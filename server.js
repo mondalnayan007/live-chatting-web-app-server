@@ -4,92 +4,85 @@ const { Server } = require('socket.io');
 const cors = require('cors');
 
 const app = express();
-const server = http.createServer(app);
-
-// ১. এক্সপ্রেস এর জন্য CORS কনফিগারেশন
-app.use(cors({
-  origin: "*", // ইন্ডাস্ট্রিয়াল লেভেলে ডেপ্লয়মেন্ট টেস্টিং এর জন্য আপাতত "*" (All) করে দিন
-  methods: ["GET", "POST", "PUT", "DELETE"],
-  credentials: true
-}));
-
+app.use(cors());
 app.use(express.json());
 
-// ২. সকেট (Socket.io) এর জন্য CORS কনফিগারেশন
+const server = http.createServer(app);
+
+// সকেট কনফিগারেশন
 const io = new Server(server, {
   cors: {
-    origin: "*", // সব ধরনের ফ্রন্টএন্ড লিঙ্ক (localhost এবং vercel/netlify) অ্যালাউ করবে
-    methods: ["GET", "POST"],
-    credentials: true
+    origin: "*", // লোকাল এবং প্রোডাকশন সব ফ্রন্টএন্ডের জন্য ওপেন রাখা হলো
+    methods: ["GET", "POST"]
   }
 });
 
-// গ্লোবাল ডাটা স্টোর
-let directoryUsers = []; // [{ id, name, age, country, gender, profilePic }]
-let globalBlocks = {};   // { nickname: [blockedNicknames] }
+let directoryUsers = [];
+let globalBlocks = {};
 
-// --- HTTP API ROUTE FOR LOGIN ---
+// লগইন এপিআই
 app.post('/api/login', (req, res) => {
   const { name } = req.body;
-  if (!name) {
-    return res.status(400).json({ success: false, message: "Nickname is required." });
+  if (!name) return res.status(400).json({ message: "Name is required" });
+  
+  const exists = directoryUsers.some(u => u.name.toLowerCase() === name.trim().toLowerCase());
+  if (exists) {
+    return res.status(400).json({ message: "Nickname already taken active in directory!" });
   }
-
-  // চেক করা হচ্ছে এই নামের কোনো ইউজার অলরেডি ডিরেক্টরিতে আছে কিনা
-  const isNameTaken = directoryUsers.some(
-    u => u.name.toLowerCase().trim() === name.toLowerCase().trim()
-  );
-
-  if (isNameTaken) {
-    return res.status(400).json({ 
-      success: false, 
-      message: `The nickname "${name}" is already taken. Please choose another name.` 
-    });
-  }
-
-  // নাম ইউনিক হলে সাকসেস রিটার্ন করা হচ্ছে
-  return res.status(200).json({ success: true });
+  res.status(200).json({ message: "Success" });
 });
 
-
-// --- SOCKET CONNECTION ---
 io.on('connection', (socket) => {
-  console.log(`⚡ A user connected: ${socket.id}`);
+  console.log(`User Connected: ${socket.id}`);
 
-  // ডিরেক্টরিতে জয়েন করা (সকেট সেশন ম্যাপিং)
+  // ইউজারের ডিরেক্টরিতে জয়েন করা
   socket.on('join_directory', (userData) => {
-    if (!userData || !userData.name) return;
-
-    // আগের কোনো সেশন থাকলে রিমুভ করে নতুন সকেটে আপডেট করা
+    socket.username = userData.name;
+    
+    // আগের কোনো সেশন থাকলে ক্লিয়ার করা
     directoryUsers = directoryUsers.filter(u => u.name !== userData.name);
     
-    const newUser = {
-      id: socket.id,
-      name: userData.name,
-      age: userData.age,
-      country: userData.country,
-      gender: userData.gender,
-      profilePic: userData.profilePic
-    };
-
+    const newUser = { id: socket.id, ...userData };
     directoryUsers.push(newUser);
-
-    // সব ইউজারকে অ্যাক্টিভ ডিরেক্টরি লিস্ট এবং ব্লক লিস্ট পাঠানো
+    
+    // সবাইকে আপডেট পাঠানো
     io.emit('update_directory', directoryUsers);
-    io.emit('sync_global_blocks', globalBlocks);
+    socket.emit('sync_global_blocks', globalBlocks);
   });
 
-  // প্রাইভেট মেসেজ আদান-প্রদান
-  socket.on('send_private_message', ({ toSocketId, message, msgId, fileType }) => {
-    const sender = directoryUsers.find(u => u.id === socket.id);
-    if (!sender) return;
-
+  // রিয়েল-টাইম প্রাইভেট মেসেজ রাউটিং
+  socket.on('send_private_message', ({ toSocketId, message, msgId, fileType, timestamp }) => {
     socket.to(toSocketId).emit('receive_private_message', {
       fromSocketId: socket.id,
-      senderName: sender.name,
+      senderName: socket.username,
       message,
       msgId,
-      fileType: fileType || 'text'
+      fileType,
+      timestamp
+    });
+  });
+
+  // ডাবল টিক (Delivery / Seen ACK) লজিক
+  socket.on('message_delivery_ack', ({ toSocketId, fromName, msgId, isSeen }) => {
+    socket.to(toSocketId).emit('receive_delivery_ack', {
+      fromName,
+      msgId,
+      isSeen
+    });
+  });
+
+  // চ্যাট বক্স ওপেন করলে ব্লু টিক ট্রিগার
+  socket.on('chat_opened_or_seen', ({ fromName, toSocketId }) => {
+    socket.to(toSocketId).emit('partner_marked_seen', {
+      fromName
+    });
+  });
+
+  // লাইভ টাইপিং ইন্ডিকেটর
+  socket.on('typing_status', ({ toSocketId, isTyping, senderName }) => {
+    socket.to(toSocketId).emit('receive_typing_status', {
+      senderName,
+      isTyping
     });
   });
 
@@ -103,32 +96,13 @@ io.on('connection', (socket) => {
     socket.to(toSocketId).emit('message_edited_global', { msgId, newText });
   });
 
-  // ইউজার ব্লক করার লজিক
-  socket.on('block_user_action', ({ blockerName, blockedName }) => {
-    if (!globalBlocks[blockerName]) globalBlocks[blockerName] = [];
-    if (!globalBlocks[blockerName].includes(blockedName)) {
-      globalBlocks[blockerName].push(blockedName);
-    }
-    io.emit('sync_global_blocks', globalBlocks);
-  });
-
-  // ইউজার আনব্লক করার লজিক
-  socket.on('unblock_user_action', ({ blockerName, blockedName }) => {
-    if (globalBlocks[blockerName]) {
-      globalBlocks[blockerName] = globalBlocks[blockerName].filter(name => name !== blockedName);
-    }
-    io.emit('sync_global_blocks', globalBlocks);
-  });
-
   // ডিসকানেক্ট হ্যান্ডলার
   socket.on('disconnect', () => {
-    console.log(`❌ User disconnected: ${socket.id}`);
+    console.log(`User Disconnected: ${socket.id}`);
     directoryUsers = directoryUsers.filter(u => u.id !== socket.id);
     io.emit('update_directory', directoryUsers);
   });
 });
 
-const PORT = 5000;
-server.listen(PORT, () => {
-  console.log(`🚀 Server is running on http://localhost:${PORT}`);
-});
+const PORT = process.env.PORT || 5000;
+server.listen(PORT, () => console.log(`Backend Server running on port ${PORT}`));
