@@ -4,20 +4,23 @@ const { Server } = require('socket.io');
 const cors = require('cors');
 
 const app = express();
-// CORS কনফিগারেশন নিশ্চিত করুন
-app.use(cors({
-  origin: "http://localhost:5173",
-  methods: ["GET", "POST"]
-}));
-app.use(express.json());
-
 const server = http.createServer(app);
 
-// Socket.io Setup
+// ১. এক্সপ্রেস এর জন্য CORS কনফিগারেশন
+app.use(cors({
+  origin: "*", // ইন্ডাস্ট্রিয়াল লেভেলে ডেপ্লয়মেন্ট টেস্টিং এর জন্য আপাতত "*" (All) করে দিন
+  methods: ["GET", "POST", "PUT", "DELETE"],
+  credentials: true
+}));
+
+app.use(express.json());
+
+// ২. সকেট (Socket.io) এর জন্য CORS কনফিগারেশন
 const io = new Server(server, {
   cors: {
-    origin: "http://localhost:5173",
-    methods: ["GET", "POST"]
+    origin: "*", // সব ধরনের ফ্রন্টএন্ড লিঙ্ক (localhost এবং vercel/netlify) অ্যালাউ করবে
+    methods: ["GET", "POST"],
+    credentials: true
   }
 });
 
