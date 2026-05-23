@@ -169,11 +169,11 @@ io.on('connection', (socket) => {
 
     const { toSocketId, message, msgId, fileType, timestamp } = data;
 
-  // 🌟 [AI Agent চেক]
+  // 🌟 [AI Agent চেক]: যদি মেসেজটি AI-এর উদ্দেশ্যে পাঠানো হয়
     if (toSocketId === 'ai_agent' || data.receiverName === '🤖 Chat-AI Bot') {
       console.log(`🤖 AI Agent received a message from ${senderName}: ${message}`);
 
-      // ১. ইউজারকে টাইপিং স্ট্যাটাস পাঠান
+      // ১. ইউজারকে টাইপিং স্ট্যাটাস পাঠানো
       socket.emit('receive_typing_status', { senderName: '🤖 Chat-AI Bot', isTyping: true });
 
       let aiResponseText = "দুঃখিত, আমি এই মুহূর্তে কিছুটা ব্যস্ত আছি। দয়া করে একটু পর আবার চেষ্টা করুন।";
@@ -181,7 +181,7 @@ io.on('connection', (socket) => {
       try {
         if (aiClient) {
           const model = aiClient.getGenerativeModel({ model: "gemini-2.5-flash" });
-          const prompt = `You are a friendly AI Friend named 'Chat-AI Bot'. Keep your responses natural, conversational, and very short (maximum 2 sentences). Do NOT use any markdown stars or bullet points. Reply in the language the user speaks. User says: ${message}`;
+          const prompt = `You are a friendly AI Friend named 'Chat-AI Bot'. Keep your responses natural, conversational, and very short (maximum 2 sentences). Do NOT use any markdown formatting like stars or bullet points. Reply in the language the user speaks to you. User says: ${message}`;
           
           const result = await model.generateContent(prompt);
           aiResponseText = String(result.response.text()).trim().replace(/\*\*/g, ''); 
@@ -191,28 +191,27 @@ io.on('connection', (socket) => {
         aiResponseText = "ওহ! আমার প্রসেসিংয়ে একটু সমস্যা হয়েছে। আবার একটু বলবেন কি?";
       }
 
-      // ২. টাইপিং স্ট্যাটাস বন্ধ করুন
+      // ২. টাইপিং স্ট্যাটাস বন্ধ করা
       socket.emit('receive_typing_status', { senderName: '🤖 Chat-AI Bot', isTyping: false });
 
-      // ইউজারের পাঠানো টাইমস্ট্যাম্পটাই ব্যবহার করছি যাতে ফ্রন্টএন্ডে ঝামেলা না হয়
-      const safeTimestamp = timestamp || new Date();
+      const safeTimestamp = timestamp || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       const aiMsgId = `ai_msg_${Date.now()}`;
 
-      // 💾 ৩. আগে ডাটাবেজে সেভ করা নিশ্চিত করি
+      // 💾 ৩. ডাটাবেজে মেসেজ সেভ (যাতে রিফ্রেশ করলেও ডাটাবেজে থাকে)
       if (messagesCollection) {
         try {
           // ইউজারের মেসেজ সেভ
           await messagesCollection.insertOne({
             msgId: msgId || `msg_${Date.now()}`,
             senderName: senderName,
-            receiverName: '🤖 Chat-AI Bot',
+            receiverName: '🤖 Chat-AI Bot', // ফ্রন্টএন্ড কি-র সাথে মিল রাখা হলো
             message: message,
             fileType: 'text',
             timestamp: safeTimestamp,
             dbTime: new Date()
           });
 
-          // AI-এর উত্তর সেভ
+          // AI এর মেসেজ সেভ
           await messagesCollection.insertOne({
             msgId: aiMsgId,
             senderName: '🤖 Chat-AI Bot',
@@ -222,32 +221,26 @@ io.on('connection', (socket) => {
             timestamp: safeTimestamp,
             dbTime: new Date()
           });
-          console.log(`💾 AI Chat saved to MongoDB!`);
+          console.log(`💾 AI Chat history successfully saved for: ${senderName}`);
         } catch (dbSaveErr) {
-          console.error("⚠️ DB Save Error:", dbSaveErr.message);
+          console.error("⚠️ AI DB Save Error:", dbSaveErr.message);
         }
       }
 
-      // 🎯 ৪. [সবচেয়ে গুরুত্বপূর্ণ ফিক্স]: সকেটের মাধ্যমে ফ্রন্টএন্ডে রিয়েল-টাইম রেসপন্স পাঠানো
-      // এখানে অবজেক্টের কী (Keys) গুলো আপনার ফ্রন্টএন্ডের সাধারণ মেসেজের মতো হুবহু এক হতে হবে।
-      const responsePayload = {
-        fromSocketId: 'ai_agent',          // অথবা socket.id ও দিতে পারেন ফ্রন্টএন্ড লজিক অনুযায়ী
-        toSocketId: socket.id,             // 👈 ইউজারকে টার্গেট করার জন্য যোগ করা হলো
-        senderName: '🤖 Chat-AI Bot',
-        receiverName: senderName,           // 👈 এটিও জরুরি, কারণ ফ্রন্টএন্ড অনেক সময় রিসিভার নাম চেক করে
+      // 🎯 ৪. সকেটের মাধ্যমে ফ্রন্টএন্ডে রিয়েল-টাইম রেসপন্স পাঠানো
+      // এই অবজেক্টের প্রতিটি কী (Key) এখন ফ্রন্টএন্ডের রিসিভার লজিকের সাথে ১০০% ম্যাচ করবে
+      socket.emit('receive_private_message', {
+        fromSocketId: 'ai_agent',          
+        toSocketId: socket.id,             
+        senderName: '🤖 Chat-AI Bot', // 👈 এটিই ফ্রন্টএন্ডের chatKey হিসেবে ক্যাচ করবে
+        receiverName: senderName,           
         message: aiResponseText,
-        text: aiResponseText,              // 👈 সেফটি হিসেবে 'text' কি-ও দেওয়া হলো, যদি ফ্রন্টএন্ডে এটি রিড করে
         msgId: aiMsgId,
         fileType: 'text',
         timestamp: safeTimestamp
-      };
+      });
 
-      // ইউজারের নিজস্ব সকেটে সরাসরি ইমিট করুন (যাতে লাইভ সার্ভারে ল্যাগ বা ড্রপ না হয়)
-      socket.emit('receive_private_message', responsePayload);
-      
-      console.log(`🚀 Sent real-time AI reply to client: ${senderName}`);
-
-      return; // ⚠️ ফাংশন এখানেই শেষ!
+      return; // ⚠️ ফাংশন এখানেই ব্রেক করবে
     }
 
     const targetUser = activeUsersDirectory.find(u => u.id === toSocketId);
