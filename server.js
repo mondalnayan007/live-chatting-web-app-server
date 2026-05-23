@@ -3,7 +3,7 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
-const { MongoClient } = require('mongodb'); 
+const { MongoClient } = require('mongodb');
 const { OAuth2Client } = require('google-auth-library');
 
 const app = express();
@@ -19,20 +19,20 @@ app.use(express.urlencoded({ limit: '25mb', extended: true }));
 
 // MongoDB Connection
 const MONGO_URI = "mongodb+srv://user:HelloNayan007@cluster0.kc2s7sf.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0";
-const dbName = "chat_app"; 
+const dbName = "chat_app";
 let db, usersCollection, messagesCollection;
 
 MongoClient.connect(MONGO_URI)
   .then(clientInstance => {
     db = clientInstance.db(dbName);
-    usersCollection = db.collection("users"); 
-    messagesCollection = db.collection("messages"); 
+    usersCollection = db.collection("users");
+    messagesCollection = db.collection("messages");
     console.log(`🎉 Pure MongoDB Driver Connected! Database: '${dbName}'`);
   })
   .catch(err => console.error("❌ MongoDB Connection Failed:", err));
 
 let activeUsersDirectory = [];
-let globalBlocks = {}; 
+let globalBlocks = {};
 let disconnectTimeouts = {}; // রিফ্রেশ ট্র্যাকিংয়ের জন্য গ্লোবাল অবজেক্ট
 
 // ------------------- API ROUTES -------------------
@@ -72,7 +72,7 @@ app.post('/api/login', async (req, res) => {
         name: name.trim(), age: Number(age), country: country || 'Bangladesh',
         gender: gender || 'Male', profilePic: finalPic, isGuest: true, createdAt: new Date()
       };
-      const result = await usersCollection.insertOne(newGuest); 
+      const result = await usersCollection.insertOne(newGuest);
       guestUser = { _id: result.insertedId, ...newGuest };
       console.log(`🎉 New Guest Saved to usersCollection: ${guestUser.name}`);
     }
@@ -99,8 +99,8 @@ io.on('connection', (socket) => {
     if (!userData || !userData.name) return;
 
     const formattedName = userData.name.trim();
-    socket.username = formattedName; 
-    socket.isGuestUser = (userData.isGuest === true || userData.isGuest === 'true'); 
+    socket.username = formattedName;
+    socket.isGuestUser = (userData.isGuest === true || userData.isGuest === 'true');
 
     // ইউজার যদি রিফ্রেশ দিয়ে ৫ সেকেন্ডের মধ্যে ফিরে আসে, তবে তার মেসেজ ডিলিট হওয়ার টাইমার বাতিল হবে
     if (disconnectTimeouts[formattedName]) {
@@ -112,7 +112,7 @@ io.on('connection', (socket) => {
     if (usersCollection) {
       try {
         const existingUser = await usersCollection.findOne({ name: formattedName });
-        
+
         if (!existingUser) {
           await usersCollection.insertOne({
             name: formattedName,
@@ -120,7 +120,7 @@ io.on('connection', (socket) => {
             country: userData.country || 'Bangladesh',
             gender: userData.gender || 'Male',
             profilePic: userData.profilePic || '',
-            isGuest: socket.isGuestUser, 
+            isGuest: socket.isGuestUser,
             createdAt: new Date()
           });
           console.log(`👤 New user registered in usersCollection: ${formattedName}`);
@@ -155,7 +155,7 @@ io.on('connection', (socket) => {
     if (targetUser) {
       const iBlockHim = globalBlocks[senderName] && globalBlocks[senderName].includes(targetUser.name);
       const heBlocksMe = globalBlocks[targetUser.name] && globalBlocks[targetUser.name].includes(senderName);
-      if (iBlockHim || heBlocksMe) return; 
+      if (iBlockHim || heBlocksMe) return;
     }
 
     if (messagesCollection) {
@@ -164,7 +164,7 @@ io.on('connection', (socket) => {
           msgId: msgId || `msg_${Date.now()}`,
           senderName: senderName,
           receiverName: receiverName,
-          message: message || data.text || "", 
+          message: message || data.text || "",
           fileType: fileType || 'text',
           timestamp: timestamp || new Date(),
           dbTime: new Date() // নিখুঁত সর্ٹنگয়ের জন্য সার্ভার টাইমস্ট্যাম্প
@@ -237,6 +237,28 @@ io.on('connection', (socket) => {
     io.emit('sync_global_blocks', globalBlocks);
   });
 
+// 🎭 ব্যাকএন্ড সকেট ইভেন্ট (Pure MongoDB Driver Fix)
+socket.on('send_message_reaction', async ({ toSocketId, msgId, reaction, senderName }) => {
+  try {
+    if (!messagesCollection) return;
+
+    // 💾 পিওর মঙ্গোডিবি ড্রাইভার ব্যবহার করেupdateOne করা হলো
+    await messagesCollection.updateOne(
+      { msgId: msgId }, 
+      { $set: { reaction: reaction } }
+    );
+
+    console.log(`🎭 Reaction '${reaction}' updated in DB for msgId: ${msgId}`);
+
+    // অপর প্রান্তের ইউজার অনলাইন থাকলে তাকে রিয়েল-টাইমে পাঠানো
+    if (toSocketId) {
+      socket.to(toSocketId).emit('message_reaction_global', { msgId, reaction, fromName: senderName });
+    }
+  } catch (err) {
+    console.error("❌ Database reaction save error:", err.message);
+  }
+});
+
   // [ডিসকানেক্ট হ্যান্ডলার]: গেস্ট ইউজার রিফ্রেশ দিলে ডাটা সেভ রাখবে, ৫ সেকেন্ড পর চলে গেলে ক্লিয়ার করবে
   socket.on('disconnect', async () => {
     console.log(`❌ User disconnected: ${socket.id}`);
@@ -248,7 +270,7 @@ io.on('connection', (socket) => {
 
       if (socket.isGuestUser === true || socket.isGuestUser === 'true') {
         console.log(`⏳ Setting a 5-second timeout before deleting data for guest: ${disconnectedUser}`);
-        
+
         disconnectTimeouts[disconnectedUser] = setTimeout(async () => {
           try {
             await usersCollection.deleteOne({ name: disconnectedUser, isGuest: true });
@@ -267,7 +289,7 @@ io.on('connection', (socket) => {
           } catch (dbErr) {
             console.error("❌ টাইমাউটে ডাটা ক্লিয়ার এরর:", dbErr.message);
           }
-        }, 5000); 
+        }, 5000);
       } else {
         console.log(`🔒 গুগল ইউজার '${disconnectedUser}' ডিসকানেক্ট হয়েছে (ডাটা সেভড)।`);
       }
