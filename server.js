@@ -180,34 +180,39 @@ io.on('connection', (socket) => {
 
       try {
         if (aiClient) {
-          // Gemini-র স্ট্যান্ডার্ড এবং দ্রুততম মডেল ব্যবহার করা হচ্ছে
           const model = aiClient.getGenerativeModel({ model: "gemini-2.5-flash" });
+          const prompt = `You are a friendly AI Friend named 'Chat-AI Bot'. Keep your responses natural, conversational, and very short (maximum 2 sentences). Do NOT use any markdown formatting like stars or bullet points. Reply in the language the user speaks to you. User says: ${message}`;
           
-          // AI এর প্রম্পট সেটআপ
-          const prompt = `You are a friendly AI Friend named 'Chat-AI Bot' integrated into a real-time chat application. Keep your responses natural, conversational, polite, and relatively short. Reply in the language the user speaks to you (Bengali or English). User says: ${message}`;
-          
-          // প্যাকেজের নতুন মেথড অনুযায়ী সরাসরি generateContent কল করা হলো
           const result = await model.generateContent(prompt);
-          aiResponseText = result.response.text();
-        } else {
-          aiResponseText = "আমি AI বট, কিন্তু ব্যাকএন্ডে আমার API Key সেট করা হয়নি। অনুগ্রহ করে আপনার .env ফাইলে GEMINI_API_KEY বসান।";
+          
+          // 🎯 [ফিক্স ১]: রেসপন্সটিকে জোরপূর্বক স্ট্রিং (String) বানিয়ে নেওয়া হচ্ছে 
+          // এবং আশেপাশের সব অতিরিক্ত স্পেস বা হিডেন ক্যারেক্টার ছেঁটে ফেলা হচ্ছে (trim)
+          aiResponseText = String(result.response.text()).trim();
+
+          // 🎯 [ফিক্স ২]: কোনো কারণে যদি জেמיני মার্কডাউন বা স্টার (**) পাঠায়, তা রিমুভ করার সেফটি গার্ড
+          aiResponseText = aiResponseText.replace(/\*\*/g, ''); 
+
+          console.log(`🤖 AI Generated Response Successfully: ${aiResponseText}`);
         }
       } catch (aiErr) {
-        console.error("❌ Gemini AI Error:", aiErr.message);
+        console.error("❌ Gemini AI Error on Render:", aiErr.message);
         aiResponseText = "ওহ! আমার প্রসেসিংয়ে একটু সমস্যা হয়েছে। আবার একটু বলবেন কি?";
       }
 
-      // AI-এর টাইপিং স্ট্যাটাস বন্ধ করা
+      // AI-এর টাইপিং স্ট্যাটাস বন্ধ করুন
       socket.emit('receive_typing_status', { senderName: '🤖 Chat-AI Bot', isTyping: false });
 
-      // ইউজারকে রিয়েল-টাইম AI রেসপন্স পাঠানো
+      // 🎯 [ফিক্স ৩]: ফ্রন্টএন্ডে যাতে কোনো অবজেক্ট মিসম্যাচ না হয়, তাই ডেটা টাইপ একদম নিখুঁত করা হলো
+      const safeResponseText = aiResponseText || "আমি একটু কনফিউজড হয়ে গেছি, আবার বলবেন?";
+
+      // ইউজারকে রিয়েল-টাইม AI রেসপন্স পাঠানো
       socket.emit('receive_private_message', {
         fromSocketId: 'ai_agent',
         senderName: '🤖 Chat-AI Bot',
-        message: aiResponseText,
+        message: safeResponseText, // 👈 একদম ফ্রেশ এবং ক্লিন স্ট্রিং টেক্সট যাচ্ছে
         msgId: `ai_msg_${Date.now()}`,
         fileType: 'text',
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        timestamp: timestamp || new Date() // ফ্রন্টএন্ডের ফরম্যাটটাই ব্যাক করা হচ্ছে
       });
 
       // 💾 ডাটাবেজে AI চ্যাটের মেসেজ সেভ করা (যাতে পেজ রিফ্রেশ দিলেও চ্যাট হিস্ট্রি থাকে)
@@ -331,40 +336,71 @@ io.on('connection', (socket) => {
   });
 
   // 🛠️ [ফিক্সড ডিসকানেক্ট হ্যান্ডলার]: ইনস্ট্যান্ট ডিলিট না করে ৫ সেকেন্ড ওয়েট করবে
+  // 🚪 ইউজার ডিসকানেক্ট বা ট্যাব ক্লোজ করার আপডেটেড লজিক
   socket.on('disconnect', async () => {
     console.log(`❌ User disconnected: ${socket.id}`);
     const disconnectedUser = socket.username;
 
     if (disconnectedUser && usersCollection) {
+      // অনলাইন ডিরেক্টরি থেকে ইউজারকে বাদ দেওয়া এবং ফ্রন্টএন্ডে পাঠানো
       activeUsersDirectory = activeUsersDirectory.filter(u => u.id !== socket.id);
       io.emit('update_directory', activeUsersDirectory);
 
-      if (socket.isGuestUser === true || socket.isGuestUser === 'true') {
-        console.log(`⏳ Setting a 5-second timeout before deleting data for guest: ${disconnectedUser}`);
-        
-        // ৫ সেকেন্ডের টাইমার সেট করা হলো
-        disconnectTimeouts[disconnectedUser] = setTimeout(async () => {
-          try {
-            await usersCollection.deleteOne({ name: disconnectedUser, isGuest: true });
-            console.log(`🗑️ গেস্ট ইউজার '${disconnectedUser}' users কালেকশন থেকে ডিলিট হয়েছে।`);
+      // 🌟 [AI চ্যাট মুছার কমন লজিক]: ইউজার গেস্ট হোক বা গুগল ইউজার, ট্যাব ক্লোজ করলে AI চ্যাট মুছবে।
+      // আমরা ৫ সেকেন্ড অপেক্ষা করব দেখার জন্য যে ইউজার রিফ্রেশ দিয়েছে নাকি আসলেই ট্যাব ক্লোজ করেছে।
+      
+      // যদি এই ইউজারের জন্য আগে থেকেই কোনো টাইমার চালু থাকে, তা ক্লিয়ার করে নতুন করে সেট করছি
+      if (disconnectTimeouts[disconnectedUser]) {
+        clearTimeout(disconnectTimeouts[disconnectedUser]);
+      }
+
+      disconnectTimeouts[disconnectedUser] = setTimeout(async () => {
+        try {
+          // চেক করুন ইউজার কি ৫ সেকেন্ডের মধ্যে রিফ্রেশ দিয়ে আবার ব্যাক করেছে?
+          const isStillOnline = activeUsersDirectory.some(u => u.name === disconnectedUser);
+
+          if (!isStillOnline) {
+            console.log(`🧹 ${disconnectedUser} closed the tab. Cleaning up AI Agent chat...`);
 
             if (messagesCollection) {
-              const deleteResult = await messagesCollection.deleteMany({
+              // 🗑️ ১. এই নির্দিষ্ট ইউজারের সাথে AI Bot-এর যত চ্যাট ছিল সব মুছে ফেলা হচ্ছে (সবার জন্যই প্রযোজ্য)
+              const aiDeleteResult = await messagesCollection.deleteMany({
                 $or: [
-                  { senderName: disconnectedUser },
-                  { receiverName: disconnectedUser }
+                  { senderName: disconnectedUser, receiverName: '🤖 Chat-AI Bot' },
+                  { senderName: '🤖 Chat-AI Bot', receiverName: disconnectedUser }
                 ]
               });
-              console.log(`🗑️ '${disconnectedUser}' এর চ্যাট হিস্ট্রি সম্পূর্ণ ক্লিয়ার! মোট মুছে ফেলা মেসেজ: ${deleteResult.deletedCount}`);
+              console.log(`🗑️ AI Messages cleared for ${disconnectedUser}. Deleted count: ${aiDeleteResult.deletedCount}`);
             }
-            delete disconnectTimeouts[disconnectedUser];
-          } catch (dbErr) {
-            console.error("❌ টাইমাউটে ডাটা ক্লিয়ার এরর:", dbErr.message);
+
+            // 🗑️ ২. শুধুমাত্র গেস্ট ইউজার হলে তার নিজের প্রোফাইল এবং বাকি সব মেসেজ ডিলিট হবে (আপনার আগের লজিক)
+            if (socket.isGuestUser === true || socket.isGuestUser === 'true') {
+              await usersCollection.deleteOne({ name: disconnectedUser, isGuest: true });
+              console.log(`🗑️ গেস্ট ইউজার '${disconnectedUser}' users কালেকশন থেকে ডিলিট হয়েছে।`);
+
+              if (messagesCollection) {
+                const deleteResult = await messagesCollection.deleteMany({
+                  $or: [
+                    { senderName: disconnectedUser },
+                    { receiverName: disconnectedUser }
+                  ]
+                });
+                console.log(`🗑️ গেস্ট ইউজার '${disconnectedUser}' এর বাকি সব চ্যাট হিস্ট্রি ক্লিয়ার!`);
+              }
+            } else {
+              console.log(`🔒 গুগল ইউজার '${disconnectedUser}' এর অ্যাকাউন্ট ও সাধারণ চ্যাট সেভ রইল (শুধু AI চ্যাট ডিলিট)।`);
+            }
+          } else {
+            console.log(`🔄 ${disconnectedUser} just refreshed the page. Kept all chat history safe.`);
           }
-        }, 5000); // ৫০০০ মিলি-সেকেন্ড = ৫ সেকেন্ড
-      } else {
-        console.log(`🔒 গুগল ইউজার '${disconnectedUser}' ডিসকানেক্ট হয়েছে (ডাটা সেভড)।`);
-      }
+
+          // কাজ শেষে টাইমার অবজেক্ট ক্লিয়ার করা
+          delete disconnectTimeouts[disconnectedUser];
+        } catch (dbErr) {
+          console.error("❌ টাইমাউটে ডাটা ক্লিয়ার এরর:", dbErr.message);
+        }
+      }, 5000); // ৫ সেকেন্ডের সেফটি টাইমার
+
     }
   });
 });
