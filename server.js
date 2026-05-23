@@ -1,9 +1,11 @@
+require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
 const { MongoClient } = require('mongodb'); 
 const { OAuth2Client } = require('google-auth-library');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 const app = express();
 const server = http.createServer(app);
@@ -19,7 +21,23 @@ app.use(express.urlencoded({ limit: '25mb', extended: true }));
 // MongoDB Connection
 const MONGO_URI = "mongodb+srv://user:HelloNayan007@cluster0.kc2s7sf.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0";
 const dbName = "chat_app"; 
-let db, usersCollection, messagesCollection; 
+let db, usersCollection, messagesCollection;
+
+// 🔒 জেמיני এপিআই কি কনফিগারেশন
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY; 
+let aiClient = null;
+
+if (GEMINI_API_KEY) {
+  try {
+    // ✅ সঠিক কনস্ট্রাক্টর GoogleGenerativeAI কল করা হলো
+    aiClient = new GoogleGenerativeAI(GEMINI_API_KEY); 
+    console.log("✅ Gemini AI Client successfully configured using GoogleGenerativeAI!");
+  } catch (err) {
+    console.error("❌ Gemini Initialization Error:", err.message);
+  }
+} else {
+  console.log("⚠️ Warning: GEMINI_API_KEY is missing in .env file!");
+}
 
 MongoClient.connect(MONGO_URI)
   .then(clientInstance => {
@@ -29,6 +47,9 @@ MongoClient.connect(MONGO_URI)
     console.log(`🎉 Pure MongoDB Driver Connected! Database: '${dbName}'`);
   })
   .catch(err => console.error("❌ MongoDB Connection Failed:", err));
+
+
+
 
 let activeUsersDirectory = [];
 let globalBlocks = {}; 
@@ -147,6 +168,79 @@ io.on('connection', (socket) => {
     if (!senderName) return;
 
     const { toSocketId, message, msgId, fileType, timestamp } = data;
+
+   // 🌟 [AI Agent চেক]: যদি মেসেজটি AI-এর উদ্দেশ্যে পাঠানো হয়
+    if (toSocketId === 'ai_agent' || data.receiverName === '🤖 Chat-AI Bot') {
+      console.log(`🤖 AI Agent received a message from ${senderName}: ${message}`);
+
+      // ইউজারকে বোঝানোর জন্য যে AI টাইপ করছে (Typing Status)
+      socket.emit('receive_typing_status', { senderName: '🤖 Chat-AI Bot', isTyping: true });
+
+      let aiResponseText = "দুঃখিত, আমি এই মুহূর্তে কিছুটা ব্যস্ত আছি। দয়া করে একটু পর আবার চেষ্টা করুন।";
+
+      try {
+        if (aiClient) {
+          // Gemini-র স্ট্যান্ডার্ড এবং দ্রুততম মডেল ব্যবহার করা হচ্ছে
+          const model = aiClient.getGenerativeModel({ model: "gemini-2.5-flash" });
+          
+          // AI এর প্রম্পট সেটআপ
+          const prompt = `You are a friendly AI Friend named 'Chat-AI Bot' integrated into a real-time chat application. Keep your responses natural, conversational, polite, and relatively short. Reply in the language the user speaks to you (Bengali or English). User says: ${message}`;
+          
+          // প্যাকেজের নতুন মেথড অনুযায়ী সরাসরি generateContent কল করা হলো
+          const result = await model.generateContent(prompt);
+          aiResponseText = result.response.text();
+        } else {
+          aiResponseText = "আমি AI বট, কিন্তু ব্যাকএন্ডে আমার API Key সেট করা হয়নি। অনুগ্রহ করে আপনার .env ফাইলে GEMINI_API_KEY বসান।";
+        }
+      } catch (aiErr) {
+        console.error("❌ Gemini AI Error:", aiErr.message);
+        aiResponseText = "ওহ! আমার প্রসেসিংয়ে একটু সমস্যা হয়েছে। আবার একটু বলবেন কি?";
+      }
+
+      // AI-এর টাইপিং স্ট্যাটাস বন্ধ করা
+      socket.emit('receive_typing_status', { senderName: '🤖 Chat-AI Bot', isTyping: false });
+
+      // ইউজারকে রিয়েল-টাইম AI রেসপন্স পাঠানো
+      socket.emit('receive_private_message', {
+        fromSocketId: 'ai_agent',
+        senderName: '🤖 Chat-AI Bot',
+        message: aiResponseText,
+        msgId: `ai_msg_${Date.now()}`,
+        fileType: 'text',
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      });
+
+      // 💾 ডাটাবেজে AI চ্যাটের মেসেজ সেভ করা (যাতে পেজ রিফ্রেশ দিলেও চ্যাট হিস্ট্রি থাকে)
+      if (messagesCollection) {
+        try {
+          // ইউজারের মেসেজ সেভ
+          await messagesCollection.insertOne({
+            msgId: msgId || `msg_${Date.now()}`,
+            senderName: senderName,
+            receiverName: '🤖 Chat-AI Bot',
+            message: message,
+            fileType: 'text',
+            timestamp: timestamp || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            dbTime: new Date()
+          });
+          // AI এর মেসেজ সেভ
+          await messagesCollection.insertOne({
+            msgId: `ai_msg_${Date.now()}`,
+            senderName: '🤖 Chat-AI Bot',
+            receiverName: senderName,
+            message: aiResponseText,
+            fileType: 'text',
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            dbTime: new Date()
+          });
+          console.log(`💾 AI Chat saved to MongoDB for user: ${senderName}`);
+        } catch (e) { 
+          console.error("❌ AI Chat DB Save Error:", e.message); 
+        }
+      }
+
+      return; // 🎯 [ফিক্স ১]: অত্যন্ত জরুরি! AI এর রেসপন্স পাঠানো শেষ হলে ফাংশনটি এখানেই শেষ হবে।
+    }
 
     const targetUser = activeUsersDirectory.find(u => u.id === toSocketId);
     const receiverName = targetUser ? targetUser.name : (data.receiverName || "Unknown");
